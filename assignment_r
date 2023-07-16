@@ -1,0 +1,967 @@
+# Invent Analytics - Promotion Bump Assignment
+# Avni Buğra Yazıcı
+
+# Libraries ####
+library(tidyverse)
+library(bestNormalize)
+library(forecast)
+library(gridExtra)
+library(xts)
+library(grid)
+library(lubridate)
+library(tseries)
+library(fUnitRoots)
+library(pdR)
+library(urca)
+library(vars)
+library(prophet)
+library(TSA)
+#
+# Data ####
+data_a <- read.csv("assignment4.1a.csv")
+data_b <- read.csv("assignment4.1b.csv")
+data_c <- read.csv("assignment4.1c.csv")
+prom_date <- read.csv("PromotionDates.csv")
+str(data_a) # Original Train Data
+str(data_b) # Original Test Data
+str(data_c) # Further info about products
+
+data_a$Date <- as.factor(data_a$Date) # Convert the Date column into date format.
+data_a$Date <- as.Date(levels(data_a$Date))[as.integer(data_a$Date)] # Works faster than 'as.Date()' function.
+head(data_a$Date)
+class(data_a$Date)
+
+data_a <- left_join(data_a, data_c, by = c('ProductCode' = 'ProductCode'))
+data_a$ProductGroup2 <- as.factor(data_a$ProductGroup2)
+prom_date$StartDate[1:5] <- format(as.Date(prom_date$StartDate[1:5], "%m/%d/%Y"), "%Y-%m-%d")
+prom_date$EndDate[1:5] <- format(as.Date(prom_date$EndDate[1:5], "%m/%d/%Y"), "%Y-%m-%d")
+prom_date$StartDate[6] <- format(as.Date(prom_date$StartDate[6], "%d/%m/%Y"), "%Y-%m-%d")
+prom_date$EndDate[6] <- format(as.Date(prom_date$EndDate[6], "%d/%m/%Y"), "%Y-%m-%d")
+prom_date[,-1] <- lapply(prom_date[,-1], as.Date)
+str(prom_date)
+
+# Clustering ####
+hist(data_a$SalesQuantity, breaks = 60) # Sales is inappropriately distributed for classical grouping methods.
+summary(data_a$SalesQuantity) 
+data_a %>% count(SalesQuantity) # Majority of the observations lie around zero.
+
+store <- aggregate(data_a$SalesQuantity, by = list("StoreCode" = data_a$StoreCode), mean)
+# Finding the mean of each store may create a new variable that can be used for grouping.
+bestNormalize(store$x)
+store$x <- predict(yeojohnson(store$x)) # Normalize for better results
+shapiro.test(store$x)
+plot(density(store$x))
+store <- store %>% mutate(StoreClass = cut(x,
+                                  breaks=c(min(x)-1, quantile(x,0.33), quantile(x,0.66), max(x)+1),
+                                  labels=c("Slow Store", "Medium Store", "Fast Store")))
+head(store)
+summary(store$x)
+
+data_a <- left_join(data_a, store[,-2], by = c('StoreCode' = 'StoreCode'))
+
+
+# The same principle is applied to product as well.
+product <- aggregate(data_a$SalesQuantity, by = list("ProductCode" = data_a$ProductCode), mean)
+bestNormalize(product$x)
+product$x <- predict(orderNorm(product$x))
+shapiro.test(product$x)
+plot(density(product$x))
+product <- product %>% mutate(ProductClass = cut(x,
+                                            breaks=c(min(x)-1, quantile(x,0.33), quantile(x,0.66), max(x)+1),
+                                            labels=c("Slow Item", "Medium Item", "Fast Item")))
+head(product)
+summary(product$x)
+data_a <- left_join(data_a, product[,-2], by = c('ProductCode' = 'ProductCode'))
+head(data_a)
+rm(store,product)
+
+# Items With the Highest Promotion Reaction ####
+prom_num = 0
+prom_prod <- function(prom_num){ # prom_num is the desired promotion number. (i.e promotion 5 = 5)
+  if(prom_num == 1){
+    promb <- data_a[data_a$Date < prom_date$StartDate[prom_num],] %>% group_by(ProductCode) %>% 
+      summarise(Before = mean(SalesQuantity), .groups = "drop") # Mean sales of all products before the first promotion.
+    prom <- data_a[data_a$Date >= prom_date$StartDate[prom_num] & data_a$Date <= prom_date$EndDate[prom_num],] %>% group_by(ProductCode) %>% 
+      summarise(Promotion = mean(SalesQuantity), .groups = "drop") # Mean sales of all products during the first promotion.
+    promotions <- left_join(prom, promb, by = c('ProductCode' = 'ProductCode'))
+    promotions$diff <- promotions$Promotion-promotions$Before
+    promotions %>% arrange(desc(diff)) %>% head(10)
+  }else{
+    promb <- data_a[data_a$Date > prom_date$EndDate[prom_num-1] & data_a$Date <= prom_date$StartDate[prom_num],] %>%
+      group_by(ProductCode) %>% 
+      summarise(Before = mean(SalesQuantity), .groups = "drop") # Mean Sale of each product between n'th and n-1'th promotions.
+    prom <- data_a[data_a$Date >= prom_date$StartDate[prom_num] & data_a$Date <= prom_date$EndDate[prom_num],] %>%
+      group_by(ProductCode) %>% 
+      summarise(Promotion = mean(SalesQuantity), .groups = "drop") # Mean Sale of each product during the n'th promotion.
+    promotions <- left_join(prom, promb, by = c('ProductCode' = 'ProductCode'))
+    promotions$diff <- promotions$Promotion-promotions$Before
+    promotions %>% arrange(desc(diff)) %>% head(10)
+  }
+}
+lapply(1:4, prom_prod) # Gives 10 products that are most effective by each promotion. For example, product 218 has seen one of the highest changes.
+rm(prom_prod)
+
+# Promotion Reaction of Stores ####
+prom_store <- function(prom_num){ # prom_num is the desired promotion number. (i.e promotion 5 = 5)
+  if(prom_num == 1){
+    promb <- data_a[data_a$Date < prom_date$StartDate[prom_num],] %>% group_by(StoreCode) %>% 
+      summarise(MeanSale = mean(SalesQuantity), .groups = "drop") # Mean sales of all stores before the first promotion.
+    prom <- data_a[data_a$Date >= prom_date$StartDate[prom_num] & data_a$Date <= prom_date$EndDate[prom_num],] %>% group_by(StoreCode) %>% 
+      summarise(MeanSale = mean(SalesQuantity), .groups = "drop") # Mean sales of all stores during the first promotion.
+    wilcox.test(promb$MeanSale, prom$MeanSale) # Conducts pair-wise test.
+    
+  }else{
+    promb <- data_a[data_a$Date > prom_date$EndDate[prom_num-1] & data_a$Date <= prom_date$StartDate[prom_num],] %>% group_by(StoreCode) %>% 
+      summarise(MeanSale = mean(SalesQuantity), .groups = "drop") # Mean Sale of each store between n'th and n-1'th promotions.
+    prom <- data_a[data_a$Date >= prom_date$StartDate[prom_num] & data_a$Date <= prom_date$EndDate[prom_num],] %>% group_by(StoreCode) %>% 
+      summarise(MeanSale = mean(SalesQuantity), .groups = "drop") # Mean Sale of each store during the n'th promotion.
+    wilcox.test(promb$MeanSale, prom$MeanSale)
+  }
+}
+lapply(1:4, prom_store) # P-values < 0.05 suggest that there are stores that have higher promotion reactions in all promotion periods.
+rm(prom_store,prom_num)
+# Regression ####
+# Gives the data points up until 10 days after the first promotion ends.
+model_data <- data_a[data_a$Date<=prom_date$EndDate[1]+10,]
+model <- lm(SalesQuantity ~ StoreClass+ProductClass, data=model_data) 
+summary(model)
+
+# Gives the data points from the end of third promotion to the 10 days after the end of the fourth promotion.
+model_data <- data_a[data_a$Date>=prom_date$EndDate[3] & data_a$Date<=prom_date$EndDate[4]+10,] 
+str(data_a)
+model <- lm(SalesQuantity ~ StoreClass+ProductClass, data=data_a[data_a$Date>=prom_date$EndDate[3] & data_a$Date<=prom_date$EndDate[4],])
+summary(model) 
+# Checking for each period, the highest coefficients are of Fast Items and Fast Stores.
+# This means that these classes are the ones that have the highes promotion reactions.
+rm(model_data, model)
+# Time Series ####
+# Get the total sales for each product and store type in each day. Then create a multivariate time series object.
+# Products 
+slow_item <- data_a[data_a$ProductClass == "Slow Item",c(1,4)] %>% 
+  group_by(Date) %>% 
+  summarise(SlowItem = sum(SalesQuantity))
+
+# The same approach for other product and store types
+mid_item <- data_a[data_a$ProductClass == "Medium Item",c(1,4)] %>% 
+  group_by(Date) %>% 
+  summarise(MediumItem = sum(SalesQuantity))
+
+fast_item <- data_a[data_a$ProductClass == "Fast Item",c(1,4)] %>% 
+  group_by(Date) %>% 
+  summarise(FastItem = sum(SalesQuantity))
+
+# Stores
+slow_store <- data_a[data_a$StoreClass == "Slow Store",c(1,4)] %>% 
+  group_by(Date) %>% 
+  summarise(SlowStore = sum(SalesQuantity))
+
+mid_store <- data_a[data_a$StoreClass == "Medium Store",c(1,4)] %>% 
+  group_by(Date) %>% 
+  summarise(MediumStore = sum(SalesQuantity))
+
+fast_store <- data_a[data_a$StoreClass == "Fast Store",c(1,4)] %>% 
+  group_by(Date) %>% 
+  summarise(FastStore = sum(SalesQuantity))
+data <- cbind(slow_store, mid_store[,2], fast_store[,2], slow_item[,2], mid_item[,2], fast_item[,2])
+rm(slow_item,mid_item,fast_item,slow_store,mid_store,fast_store)
+head(data)
+tail(data)
+
+
+data_ts <- xts(data[,-1], data$Date)
+train <- head(data_ts,200)
+test <- tail(data_ts, 12)
+
+
+# Plots ####
+# TS Plots
+autoplot(data_ts)
+
+p1<-autoplot(data_ts[,1])+theme(axis.title.x = element_blank())+ylab("Slow Stores")+
+  geom_rect(data = prom_date[1:4,],inherit.aes = FALSE,mapping = aes(xmin = StartDate, xmax = EndDate, ymin = -Inf, ymax = Inf),
+            color = "transparent",fill = "darkred",alpha = .35)
+p2<-autoplot(data_ts[,2])+theme(axis.title.x = element_blank())+ylab("Medium Stores")+
+  geom_rect(data = prom_date[1:4,],inherit.aes = FALSE,mapping = aes(xmin = StartDate, xmax = EndDate, ymin = -Inf, ymax = Inf),
+            color = "transparent",fill = "darkred",alpha = .35)
+p3<-autoplot(data_ts[,3])+theme(axis.title.x = element_blank())+ylab("Fast Stores")+
+  geom_rect(data = prom_date[1:4,],inherit.aes = FALSE,mapping = aes(xmin = StartDate, xmax = EndDate, ymin = -Inf, ymax = Inf),
+            color = "transparent",fill = "darkred",alpha = .35)
+p4<-autoplot(data_ts[,4])+theme(axis.title.x = element_blank())+ylab("Slow Items")+
+  geom_rect(data = prom_date[1:4,],inherit.aes = FALSE,mapping = aes(xmin = StartDate, xmax = EndDate, ymin = -Inf, ymax = Inf),
+            color = "transparent",fill = "darkred",alpha = .35)
+p5<-autoplot(data_ts[,5])+theme(axis.title.x = element_blank())+ylab("Medium Items")+
+  geom_rect(data = prom_date[1:4,],inherit.aes = FALSE,mapping = aes(xmin = StartDate, xmax = EndDate, ymin = -Inf, ymax = Inf),
+            color = "transparent",fill = "darkred",alpha = .35)
+p6<-autoplot(data_ts[,6])+theme(axis.title.x = element_blank())+ylab("Fast Items")+
+  geom_rect(data = prom_date[1:4,],inherit.aes = FALSE,mapping = aes(xmin = StartDate, xmax = EndDate, ymin = -Inf, ymax = Inf),
+            color = "transparent",fill = "darkred",alpha = .35)
+grid.arrange(p1,p2,p3,nrow=3)
+grid.arrange(p4,p5,p6,nrow=3)
+rm(p1,p2,p3,p4,p5,p6)
+# There seems to be some repeating patterns in the time series plots.
+# However, they are due to the promotion dates and may not seasonality.
+
+# Monthly Box Plots
+p1 <- data_ts %>% ggplot(aes(as.factor(as.integer(year(data_ts))),SlowStore)) +
+  geom_boxplot() +
+  facet_wrap(vars(month(data_ts, label = TRUE)), nrow = 1) +
+  theme(axis.title.x=element_blank(), axis.title.y=element_blank()) +
+  ggtitle("Monthly Box Plots of Slow Stores")
+p2 <- data_ts %>% ggplot(aes(as.factor(as.integer(year(data_ts))),MediumStore)) +
+  geom_boxplot() +
+  facet_wrap(vars(month(data_ts, label = TRUE)), nrow = 1) +
+  theme(axis.title.x=element_blank(), axis.title.y=element_blank()) +
+  ggtitle("Monthly Box Plots of Medium Stores")
+p3 <- data_ts %>% ggplot(aes(as.factor(as.integer(year(data_ts))),FastStore)) +
+  geom_boxplot() +
+  facet_wrap(vars(month(data_ts, label = TRUE)), nrow = 1) +
+  theme(axis.title.x=element_blank(), axis.title.y=element_blank()) +
+  ggtitle("Monthly Box Plots of Fast Stores")
+p4 <- data_ts %>% ggplot(aes(as.factor(as.integer(year(data_ts))),SlowItem)) +
+  geom_boxplot() +
+  facet_wrap(vars(month(data_ts, label = TRUE)), nrow = 1) +
+  theme(axis.title.x=element_blank(), axis.title.y=element_blank()) +
+  ggtitle("Monthly Box Plots of Slow Items")
+p5 <- data_ts %>% ggplot(aes(as.factor(as.integer(year(data_ts))),MediumItem)) +
+  geom_boxplot() +
+  facet_wrap(vars(month(data_ts, label = TRUE)), nrow = 1) +
+  theme(axis.title.x=element_blank(), axis.title.y=element_blank()) +
+  ggtitle("Monthly Box Plots of Medium Items")
+p6 <- data_ts %>% ggplot(aes(as.factor(as.integer(year(data_ts))),FastStore)) +
+  geom_boxplot() +
+  facet_wrap(vars(month(data_ts, label = TRUE)), nrow = 1) +
+  theme(axis.title.x=element_blank(), axis.title.y=element_blank()) +
+  ggtitle("Monthly Box Plots of Fast Items")
+grid.arrange(p1,p4,nrow=2) # Slow
+grid.arrange(p2,p5,nrow=2) # Medium
+grid.arrange(p3,p6,nrow=2) # Fast
+grid.arrange(p1,p2,p3,nrow=3) # Stores
+grid.arrange(p4,p5,p6,nrow=3) # Items
+rm(p1,p2,p3,p4,p5,p6)
+# Correlograms
+p1<-ggAcf(data_ts[,1])+ggtitle(element_blank())
+p2<-ggPacf(data_ts[,1])+ggtitle(element_blank())
+grid.arrange(p1,p2,nrow=1,top=textGrob("Slow Stores"))
+
+p1<-ggAcf(data_ts[,2])+ggtitle(element_blank())
+p2<-ggPacf(data_ts[,2])+ggtitle(element_blank())
+grid.arrange(p1,p2,nrow=1,top=textGrob("Medium Stores"))
+
+p1<-ggAcf(data_ts[,3])+ggtitle(element_blank())
+p2<-ggPacf(data_ts[,3])+ggtitle(element_blank())
+grid.arrange(p1,p2,nrow=1,top=textGrob("Fast Stores"))
+
+p1<-ggAcf(data_ts[,4])+ggtitle(element_blank())
+p2<-ggPacf(data_ts[,4])+ggtitle(element_blank())
+grid.arrange(p1,p2,nrow=1,top=textGrob("Slow Items"))
+
+p1<-ggAcf(data_ts[,5])+ggtitle(element_blank())
+p2<-ggPacf(data_ts[,5])+ggtitle(element_blank())
+grid.arrange(p1,p2,nrow=1,top=textGrob("Medium Items"))
+
+p1<-ggAcf(data_ts[,6])+ggtitle(element_blank())
+p2<-ggPacf(data_ts[,6])+ggtitle(element_blank())
+grid.arrange(p1,p2,nrow=1,top=textGrob("Fast Items"))
+rm(p1,p2)
+# Testing ####
+# Stationarity
+lapply(data_ts, kpss.test)  # Slow and medium items seem stationary.
+summary(ur.df(data_ts[,1])) # Nonstationary
+summary(ur.df(data_ts[,2])) # Nonstationary
+summary(ur.df(data_ts[,3])) # Nonstationary
+summary(ur.df(data_ts[,4])) # Nonstationary
+summary(ur.df(data_ts[,5])) # Nonstationary
+summary(ur.df(data_ts[,6])) # Nonstationary
+
+data_ts_diff <- diff(data_ts)
+autoplot(data_ts_diff)
+
+lapply(data_ts_diff, kpss.test) # Differencing once solves the nonstationarity problem.
+
+# Correlograms After Differencing ####
+p1<-ggAcf(data_ts_diff$SlowStore)+ggtitle(element_blank())
+p2<-ggPacf(data_ts_diff$SlowStore)+ggtitle(element_blank())
+grid.arrange(p1,p2,nrow=1,top=textGrob("Differenced Slow Stores"))
+
+p1<-ggAcf(data_ts_diff$MediumStore)+ggtitle(element_blank())
+p2<-ggPacf(data_ts_diff$MediumStore)+ggtitle(element_blank())
+grid.arrange(p1,p2,nrow=1,top=textGrob("Differenced Medium Stores"))
+
+p1<-ggAcf(data_ts_diff$FastStore)+ggtitle(element_blank())
+p2<-ggPacf(data_ts_diff$FastStore)+ggtitle(element_blank())
+grid.arrange(p1,p2,nrow=1,top=textGrob("Differenced Fast Stores"))
+
+p1<-ggAcf(data_ts_diff$FastItem)+ggtitle(element_blank())
+p2<-ggPacf(data_ts_diff$FastItem)+ggtitle(element_blank())
+grid.arrange(p1,p2,nrow=1,top=textGrob("Differenced Fast Items"))
+
+p1<-ggAcf(data_ts_diff$FastItem)+ggtitle(element_blank())
+p2<-ggPacf(data_ts_diff$FastItem)+ggtitle(element_blank())
+grid.arrange(p1,p2,nrow=1,top=textGrob("Differenced Fast Items"))
+
+p1<-ggAcf(data_ts_diff$FastItem)+ggtitle(element_blank())
+p2<-ggPacf(data_ts_diff$FastItem)+ggtitle(element_blank())
+grid.arrange(p1,p2,nrow=1,top=textGrob("Differenced Fast Items"))
+rm(p1,p2)
+
+# VAR ####
+head(data_ts_diff)
+
+varselect <- VARselect(train,lag.max=10,type="none") #define the order of VAR model
+varselect$selection
+
+p1ct <- VAR(train,p=4,type="both")
+p1ct_ser <- restrict(p1ct,method="ser",thresh=2)
+p1ct_ser$restrictions
+summary(p1ct_ser)
+roots(p1ct_ser)
+plot(p1ct_ser)
+
+norm <- normality.test(p1ct_ser, multivariate.only = TRUE)
+norm # non-normal
+
+ser1 <- serial.test(p1ct_ser,lags.pt=10,type="PT.asymptotic")
+ser1 # dependent residuals
+
+arch <- arch.test(p1ct_ser, lags.multi = 8, multivariate.only = TRUE)
+arch # no ARCH effect present
+
+predictions <- predict(p1ct_ser, n.ahead = 12, ci = 0.95)
+predictions
+par(mfrow=c(2,2))
+plot(predictions) # VAR model does not perform well. Try to model each series seperately.
+# Please widen the plot panel of your compiler for the function above.
+rm(varselect,p1ct,p1ct_ser,norm,ser1,arch,predictions)
+# Slow Store ####
+p1<-ggAcf(data_ts_diff$SlowStore)+ggtitle(element_blank())
+p2<-ggPacf(data_ts_diff$SlowStore)+ggtitle(element_blank())
+grid.arrange(p1,p2,nrow=1,top=textGrob("Differenced Slow Stores")) # SARIMA(2,1,1)
+auto.arima(data_ts[,1]) # ARIMA(1,1,1). Not significant.
+
+slow_store <- Arima(data_ts$SlowStore, order = c(2, 1, 2)) # find the significant lag orders.
+slow_store # Significant Model
+
+r <- resid(slow_store)
+autoplot(r) + geom_line(y=0) + theme_minimal() + ggtitle("Plot of The Residuals") # Zero mean
+ggplot(r, aes(sample = r)) + stat_qq()+geom_qq_line() + ggtitle("QQ Plot of the Residuals") + theme_minimal()
+shapiro.test(r) # Residuals are not normal.
+
+ggAcf(as.vector(r),main="ACF of the Residuals",lag = 48) + theme_minimal()
+Box.test(r,lag=15,type = c("Box-Pierce")) # Residuals are correlated.
+
+rr=r^2
+p1<-ggAcf(as.vector(rr))+theme_minimal()+ggtitle("ACF of Squared Residuals")
+p2<-ggPacf(as.vector(rr))+theme_minimal()+ggtitle("PACF of Squared Residuals")
+grid.arrange(p1,p2,ncol=2)
+rm(rr,p1,p2)
+bptest(lm(r ~ +zlag(data_ts$SlowStore)+zlag(data_ts$SlowStore,2))) # Heteroscedasticity is present.
+
+f <- forecast(slow_store,h=12)
+autoplot(f)+theme_minimal()+ggtitle("Forecast of ARIMA(2,1,2) for Slow Stores")
+accuracy(f,test$SlowStore) # Errors are too high. ARIMA Models are not good for these series. Others will not be checked.
+rm(p1,p2,slow_store,r,rr,f)
+
+# Exponential Smoothing #
+train$SlowStore
+test$SlowStore
+
+alpha <- seq(.01, .99, by = .01)
+RMSE <- NA
+for(i in seq_along(alpha)) {
+  fit <- ses(train$SlowStore, alpha = alpha[i],h = 12)
+  RMSE[i] <- accuracy(fit,test$SlowStore)[2,2]
+}
+data.frame(alpha, RMSE) %>% filter(RMSE == min(RMSE)) # Optimum alpha is 0.12
+
+ses_slow_store <- ses(train$SlowStore, a=0.12,  h=12)
+autoplot(ses_slow_store)+theme_minimal()+autolayer(fitted(ses_slow_store), series="Fitted") 
+summary(ses_slow_store) # Hyperparameters
+accuracy(ses_slow_store, test$SlowStore)
+
+# Holt's Method #
+beta <- seq(.0001, .5, by = .001)
+RMSE <- NA
+for(i in seq_along(beta)){
+  fit <- holt(train$SlowStore,beta = beta[i],h = 12)
+  RMSE[i] <- accuracy(fit,test$SlowStore)[2,2]
+}
+data_frame(beta, RMSE) %>% filter(RMSE==min(RMSE)) # Optimum beta is 0.0091
+
+holt_slow_store <- holt(train$SlowStore, beta = 0.0091,h = 12)
+holt_slow_store$model
+autoplot(holt_slow_store)+theme_minimal()+autolayer(fitted(holt_slow_store), series="Fitted") 
+accuracy(holt_slow_store, test$SlowStore)
+
+# Prophet #
+train_prophet <- head(data,200)
+test_prophet <- tail(data,12)
+colnames(train_prophet)[1:2] <- c("ds", "y")
+colnames(test_prophet)[1:2] <- c("ds", "y")
+prophet_slow_store <- prophet(train_prophet[,1:2])
+
+future_slow_store <- make_future_dataframe(prophet_slow_store, periods = 12)
+tail(future_slow_store)
+pf_slow_store <- predict(prophet_slow_store, future_slow_store)
+
+plot(prophet_slow_store, pf_slow_store)+theme_minimal()
+accuracy(pf_slow_store$yhat, test$SlowStore)
+
+# NNETAR 
+nnmodel_slow_store<-nnetar(train$SlowStore)
+nnmodel_slow_store
+
+nnf_slow_store <- forecast(nnmodel_slow_store, h=12,PI=TRUE)
+nnf_slow_store
+autoplot(nnf_slow_store)+theme_bw()+theme_minimal()+theme_minimal()+autolayer(fitted(nnf_slow_store), series="Fitted") 
+accuracy(nnf_slow_store,test$SlowStore)
+
+# Best Model #
+accuracy(ses_slow_store, test$SlowStore)
+accuracy(holt_slow_store, test$SlowStore) # Best model is Holt by Mean Absolute Error.
+accuracy(pf_slow_store$yhat, test$SlowStore)
+accuracy(nnf_slow_store,test$SlowStore)
+autoplot(holt_slow_store, main = "Holt's Forecast for Slow Stores")+theme_minimal()+autolayer(fitted(holt), series="Fitted") 
+rm(alpha, beta,RMSE,ses_slow_store,prophet_slow_store,future_slow_store,pf_slow_store,nnmodel_slow_store,nnf_slow_store)
+
+# Medium Store ####
+# Exponential Smoothing #
+alpha <- seq(.01, .99, by = .01)
+RMSE <- NA
+for(i in seq_along(alpha)) {
+  fit <- ses(train$MediumStore, alpha = alpha[i],h = 12)
+  RMSE[i] <- accuracy(fit,test$MediumStore)[2,2]
+}
+data.frame(alpha, RMSE) %>% filter(RMSE == min(RMSE)) # Optimum alpha is 0.1
+
+ses_mid_store <- ses(train$MediumStore, a=0.1,  h=12)
+autoplot(ses_mid_store)+theme_minimal()+autolayer(fitted(ses_mid_store), series="Fitted") 
+accuracy(ses_mid_store, test$MediumStore)
+
+# Holt's Method #
+beta <- seq(.0001, .5, by = .001)
+RMSE <- NA
+for(i in seq_along(beta)){
+  fit <- holt(train$MediumStore,beta = beta[i],h = 12)
+  RMSE[i] <- accuracy(fit,test$MediumStore)[2,2]
+}
+data_frame(beta, RMSE) %>% filter(RMSE==min(RMSE)) # Optimum beta is 0.0041
+
+holt_mid_store <- holt(train$MediumStore, beta = 0.0041,h = 12)
+autoplot(holt_mid_store)+theme_minimal()+autolayer(fitted(holt_mid_store), series="Fitted") 
+accuracy(holt_mid_store, test$MediumStore)
+
+# Prophet #
+train_prophet <- head(data,200)
+test_prophet <- tail(data,12)
+colnames(train_prophet)[c(1,3)] <- c("ds", "y")
+colnames(test_prophet)[c(1,3)] <- c("ds", "y")
+prophet_mid_store <- prophet(train_prophet[,c(1,3)])
+
+future_mid_store <- make_future_dataframe(prophet_mid_store, periods = 12)
+pf_mid_store <- predict(prophet_mid_store, future_mid_store)
+plot(prophet_mid_store, pf_mid_store)+theme_minimal()
+accuracy(pf_mid_store$yhat, test$MediumStore)
+
+# NNETAR 
+nnmodel_mid_store<-nnetar(train$MediumStore)
+nnf_mid_store <- forecast(nnmodel_mid_store, h=12,PI=TRUE)
+autoplot(nnf_mid_store)+theme_bw()+theme_minimal()+autolayer(fitted(nnf_mid_store), series="Fitted") 
+accuracy(nnf_mid_store,test$MediumStore)
+
+# Best Model #
+accuracy(ses_mid_store, test$MediumStore)
+accuracy(holt_mid_store, test$MediumStore) # Best model is Holt's.
+accuracy(pf_mid_store$yhat, test$MediumStore)
+accuracy(nnf_mid_store,test$MediumStore)
+autoplot(holt_mid_store, main = "Holt's Forecast for Medium Stores")+theme_minimal()+autolayer(fitted(holt_mid_store), series="Fitted") 
+rm(alpha,beta,RMSE,ses_mid_store,prophet_mid_store,future_mid_store,pf_mid_store,nnmodel_mid_store,nnf_mid_store)
+
+# Fast Store ####
+# Exponential Smoothing #
+alpha <- seq(.01, .99, by = .01)
+RMSE <- NA
+for(i in seq_along(alpha)) {
+  fit <- ses(train$FastStore, alpha = alpha[i],h = 12)
+  RMSE[i] <- accuracy(fit,test$FastStore)[2,2]
+}
+data.frame(alpha, RMSE) %>% filter(RMSE == min(RMSE)) # Optimum alpha is 0.11
+
+ses_fast_store <- ses(train$FastStore, a=0.11,  h=12)
+autoplot(ses_fast_store)+theme_minimal()+autolayer(fitted(ses_fast_store), series="Fitted") 
+accuracy(ses_fast_store, test$FastStore)
+
+# Holt's Method #
+beta <- seq(.0001, .5, by = .001)
+RMSE <- NA
+for(i in seq_along(beta)){
+  fit <- holt(train$FastStore,beta = beta[i],h = 12)
+  RMSE[i] <- accuracy(fit,test$FastStore)[2,2]
+}
+data_frame(beta, RMSE) %>% filter(RMSE==min(RMSE)) # Optimum beta is 0.0031
+
+holt_fast_store <- holt(train$FastStore, beta = 0.0031,h = 12)
+autoplot(holt_fast_store)+theme_minimal()+autolayer(fitted(holt_fast_store), series="Fitted") 
+accuracy(holt_fast_store, test$FastStore)
+
+# Prophet #
+train_prophet <- head(data,200)
+test_prophet <- tail(data,12)
+colnames(train_prophet)[c(1,4)] <- c("ds", "y")
+colnames(test_prophet)[c(1,4)] <- c("ds", "y")
+prophet_fast_store <- prophet(train_prophet[,c(1,4)])
+
+future_fast_store <- make_future_dataframe(prophet_fast_store, periods = 12)
+pf_fast_store <- predict(prophet_fast_store, future_fast_store)
+plot(prophet_fast_store, pf_fast_store)+theme_minimal()
+accuracy(pf_fast_store$yhat, test$FastStore)
+
+# NNETAR 
+nnmodel_fast_store<-nnetar(train$FastStore)
+nnf_fast_store <- forecast(nnmodel_fast_store, h=12,PI=TRUE)
+autoplot(nnf_fast_store)+theme_bw()+theme_minimal()+autolayer(fitted(nnf_fast_store), series="Fitted") 
+accuracy(nnf_fast_store,test$FastStore)
+
+# Best Model #
+accuracy(ses_fast_store, test$FastStore) # Best model is simple exponential smoothing.
+accuracy(holt_fast_store, test$FastStore) 
+accuracy(pf_fast_store$yhat, test$FastStore)
+accuracy(nnf_fast_store,test$FastStore)
+autoplot(ses_fast_store,main="SES forecast for Fast Store")+theme_minimal()+autolayer(fitted(ses_fast_store), series="Fitted") 
+rm(alpha,beta,RMSE,holt_fast_store,prophet_fast_store,future_fast_store,pf_fast_store,nnmodel_fast_store,nnf_fast_store)
+
+# Slow Item ####
+# Exponential Smoothing #
+alpha <- seq(.01, .99, by = .01)
+RMSE <- NA
+for(i in seq_along(alpha)) {
+  fit <- ses(train$SlowItem, alpha = alpha[i],
+             h = 12)
+  RMSE[i] <- accuracy(fit,
+                      test$SlowItem)[2,2]
+}
+data.frame(alpha, RMSE) %>% filter(RMSE == min(RMSE)) # Optimum alpha is 0.59. But It overlearns the series. 0.17 will be used
+
+ses_slow_item <- ses(train$SlowItem, a=0.17,  h=12)
+autoplot(ses_slow_item)+theme_minimal()+autolayer(fitted(ses_slow_item), series="Fitted") 
+accuracy(ses_slow_item, test$SlowItem)
+
+# Holt's Method #
+beta <- seq(.0001, .5, by = .001)
+RMSE <- NA
+for(i in seq_along(beta)){
+  fit <- holt(train$SlowItem,
+              beta = beta[i],
+              h = 12)
+  RMSE[i] <- accuracy(fit,
+                      test$SlowItem)[2,2]
+}
+
+data_frame(beta, RMSE) %>% filter(RMSE==min(RMSE)) # Optimum beta is 0.0011. 0.002 will be used.
+
+holt_slow_item <- holt(train$SlowItem, beta = 0.002,h = 12)
+autoplot(holt_slow_item)+theme_minimal()+autolayer(fitted(holt_slow_item), series="Fitted") 
+accuracy(holt_slow_item, test$SlowItem)
+
+# Prophet #
+train_prophet <- head(data,200)
+test_prophet <- tail(data,12)
+colnames(train_prophet)[c(1,5)] <- c("ds", "y")
+colnames(test_prophet)[c(1,5)] <- c("ds", "y")
+prophet_slow_item <- prophet(train_prophet[,c(1,5)])
+
+future_slow_item <- make_future_dataframe(prophet_slow_item, periods = 12)
+pf_slow_item <- predict(prophet_slow_item, future_slow_item)
+
+plot(prophet_slow_item, pf_slow_item)+theme_minimal()
+accuracy(pf_slow_item$yhat, test$SlowItem)
+
+# NNETAR 
+nnmodel_slow_item <- nnetar(train$SlowItem)
+nnf_slow_item <- forecast(nnmodel_slow_item, h=12,PI=TRUE)
+autoplot(nnf_slow_item)+theme_bw()+theme_minimal()+autolayer(fitted(nnf_slow_item), series="Fitted") 
+accuracy(nnf_slow_item,test$SlowItem)
+
+# Best Model #
+accuracy(ses_slow_item, test$SlowItem) # Best model is simple exponential smoothing.
+accuracy(holt_slow_item, test$SlowItem) 
+accuracy(pf_slow_item$yhat, test$SlowItem)
+accuracy(nnf_slow_item,test$SlowItem)
+autoplot(ses_slow_item,main="SES forecast for Fast Store")+theme_minimal()+autolayer(fitted(ses_slow_item), series="Fitted")
+rm(alpha,beta,RMSE,holt_slow_item,prophet_slow_item,future_slow_item,pf_slow_item,nnmodel_slow_item,nnf_slow_item)
+# Medium Item ####
+# Exponential Smoothing #
+alpha <- seq(.01, .99, by = .01)
+RMSE <- NA
+for(i in seq_along(alpha)){
+  fit <- ses(train$MediumItem, alpha = alpha[i],h = 12)
+  RMSE[i] <- accuracy(fit,test$MediumItem)[2,2]
+  }
+data.frame(alpha, RMSE) %>% filter(RMSE == min(RMSE)) # Optimum alpha is 0.13
+
+ses_mid_item <- ses(train$MediumItem, a=0.13,  h=12)
+autoplot(ses_mid_item)+theme_minimal()+autolayer(fitted(ses_mid_item), series="Fitted") 
+accuracy(ses_mid_item, test$MediumItem)
+
+# Holt's Method #
+beta <- seq(.0001, .5, by = .001)
+RMSE <- NA
+for(i in seq_along(beta)){
+  fit <- holt(train$MediumItem,beta = beta[i],h = 12)
+  RMSE[i] <- accuracy(fit,test$MediumItem)[2,2]
+}
+data_frame(beta, RMSE) %>% filter(RMSE==min(RMSE)) # Optimum beta is 0.0241.
+
+holt_mid_item <- holt(train$MediumItem, beta = 0.00241,h = 12)
+autoplot(holt_mid_item)+theme_minimal()+autolayer(fitted(holt_mid_item), series="Fitted") 
+accuracy(holt_mid_item, test$MediumItem)
+
+# Prophet #
+train_prophet <- head(data,200)
+test_prophet <- tail(data,12)
+colnames(train_prophet)[c(1,6)] <- c("ds", "y")
+colnames(test_prophet)[c(1,6)] <- c("ds", "y")
+prophet_mid_item <- prophet(train_prophet[,c(1,6)])
+
+future_mid_item <- make_future_dataframe(prophet_mid_item, periods = 12)
+pf_mid_item <- predict(prophet_mid_item, future_mid_item)
+plot(prophet_mid_item, pf_mid_item)+theme_minimal()
+accuracy(pf_mid_item$yhat, test$MediumItem)
+
+# NNETAR 
+nnmodel_mid_item <- nnetar(train$MediumItem)
+nnf_mid_item <- forecast(nnmodel_mid_item, h=12,PI=TRUE)
+autoplot(nnf_mid_item)+theme_bw()+theme_minimal()+autolayer(fitted(nnf_mid_item), series="Fitted") 
+accuracy(nnf_mid_item,test$MediumItem)
+
+# Best Model #
+accuracy(ses_mid_item, test$MediumItem)
+accuracy(holt_mid_item, test$MediumItem)  # Best model is Holt's Method.
+accuracy(pf_mid_item$yhat, test$MediumItem)
+accuracy(nnf_mid_item,test$MediumItem)
+autoplot(holt_mid_item,main="SES forecast for Fast Store")+theme_minimal()+autolayer(fitted(holt_mid_item), series="Fitted")
+rm(alpha,beta,RMSE,ses_mid_item,prophet_mid_item,future_mid_item,pf_mid_item,nnmodel_mid_item,nnf_mid_item)
+# Fast Item ####
+# Exponential Smoothing #
+alpha <- seq(.01, .99, by = .01)
+RMSE <- NA
+for(i in seq_along(alpha)){
+  fit <- ses(train$FastItem, alpha = alpha[i],h = 12)
+  RMSE[i] <- accuracy(fit,test$FastItem)[2,2]
+}
+data.frame(alpha, RMSE) %>% filter(RMSE == min(RMSE)) # Optimum alpha is 0.1
+
+ses_fast_item <- ses(train$FastItem, a=0.1,  h=12)
+autoplot(ses_fast_item)+theme_minimal()+autolayer(fitted(ses_fast_item), series="Fitted") 
+accuracy(ses_fast_item, test$FastItem)
+
+# Holt's Method #
+beta <- seq(.0001, .5, by = .001)
+RMSE <- NA
+for(i in seq_along(beta)){
+  fit <- holt(train$FastItem,beta = beta[i],h = 12)
+  RMSE[i] <- accuracy(fit,test$FastItem)[2,2]
+}
+data_frame(beta, RMSE) %>% filter(RMSE==min(RMSE)) # Optimum beta is 0.0041.
+
+holt_fast_item <- holt(train$FastItem, beta = 0.0041,h = 12)
+autoplot(holt_fast_item)+theme_minimal()+autolayer(fitted(holt_fast_item), series="Fitted") 
+accuracy(holt_fast_item, test$FastItem)
+
+# Prophet #
+train_prophet <- head(data,200)
+test_prophet <- tail(data,12)
+colnames(train_prophet)[c(1,7)] <- c("ds", "y")
+colnames(test_prophet)[c(1,7)] <- c("ds", "y")
+prophet_fast_item <- prophet(train_prophet[,c(1,7)])
+
+future_fast_item <- make_future_dataframe(prophet_fast_item, periods = 12)
+pf_fast_item <- predict(prophet_fast_item, future_fast_item)
+plot(prophet_fast_item, pf_fast_item)+theme_minimal()
+
+accuracy(pf_fast_item$yhat, test$FastItem)
+
+# NNETAR 
+nnmodel_fast_item <- nnetar(train$FastItem)
+nnf_fast_item <- forecast(nnmodel_fast_item, h=12,PI=TRUE)
+autoplot(nnf_fast_item)+theme_bw()+theme_minimal()+autolayer(fitted(nnf_fast_item), series="Fitted") 
+accuracy(nnf_fast_item,test$FastItem)
+
+# Best Model #
+accuracy(ses_fast_item, test$FastItem) # Best model is simple exponential smoothing.
+accuracy(holt_fast_item, test$FastItem)
+accuracy(pf_fast_item$yhat, test$FastItem)
+accuracy(nnf_fast_item,test$FastItem)
+autoplot(ses_fast_item,main="SES forecast for Fast Store")+theme_minimal()+autolayer(fitted(ses_fast_item), series="Fitted") 
+rm(alpha,beta,RMSE,holt_fast_item,prophet_fast_item,future_fast_item,pf_fast_item,nnmodel_fast_item,nnf_fast_item)
+# Best Models For Each Cluster ####
+autoplot(holt_slow_store, main = "Holt's Forecast for Slow Stores")+theme_minimal()+autolayer(fitted(holt_slow_store), series="Fitted")
+accuracy(holt_slow_store, test$SlowStore)
+autoplot(holt_mid_store, main = "Holt's Forecast for Medium Stores")+theme_minimal()+autolayer(fitted(holt_mid_store), series="Fitted")
+accuracy(holt_mid_store, test$MediumStore)
+autoplot(ses_fast_store,main="SES forecast for Fast Store")+theme_minimal()+autolayer(fitted(ses_fast_store), series="Fitted")
+accuracy(ses_fast_store, test$FastStore)
+autoplot(ses_slow_item,main="SES forecast for Fast Store")+theme_minimal()+autolayer(fitted(ses_slow_item), series="Fitted")
+accuracy(ses_slow_item, test$SlowItem)
+autoplot(holt_mid_item,main="SES forecast for Fast Store")+theme_minimal()+autolayer(fitted(holt_mid_item), series="Fitted")
+accuracy(holt_mid_item, test$MediumStore)
+autoplot(ses_fast_item,main="SES forecast for Fast Store")+theme_minimal()+autolayer(fitted(ses_fast_item), series="Fitted")
+accuracy(ses_fast_item, test$FastStore)
+
+# Test Set ####
+data_b$Date <- as.factor(data_b$Date)
+data_b$Date <- as.Date(levels(data_b$Date))[as.integer(data_b$Date)]
+
+data_b <- left_join(data_b, data_c, by = c('ProductCode' = 'ProductCode'))
+data_b[,5:6] <- lapply(data_b[,5:6], as.factor)
+
+
+# Clustering
+store <- aggregate(data_b$SalesQuantity, by = list("StoreCode" = data_b$StoreCode), mean)
+store$x <- predict(yeojohnson(store$x))
+store <- store %>% mutate(StoreClass = cut(x,breaks=c(min(x)-1, quantile(x,0.33), quantile(x,0.66), max(x)+1),
+                                           labels=c("Slow Store", "Medium Store", "Fast Store")))
+data_b <- left_join(data_b, store[,-2], by = c('StoreCode' = 'StoreCode'))
+
+
+product <- aggregate(data_b$SalesQuantity, by = list("ProductCode" = data_b$ProductCode), mean)
+product$x <- predict(orderNorm(product$x))
+product <- product %>% mutate(ProductClass = cut(x,breaks=c(min(x)-1, quantile(x,0.33), quantile(x,0.66), max(x)+1),
+                                                 labels=c("Slow Item", "Medium Item", "Fast Item")))
+data_b <- left_join(data_b, product[,-2], by = c('ProductCode' = 'ProductCode'))
+rm(store,product)
+str(data_b)
+
+# Time Series
+## Products 
+slow_item <- data_b[data_b$ProductClass == "Slow Item",c(1,4)] %>% group_by(Date) %>% 
+  summarise(SlowItem = sum(SalesQuantity)) %>% .[-154,]
+
+mid_item <- data_b[data_b$ProductClass == "Medium Item",c(1,4)] %>% group_by(Date) %>% 
+  summarise(MediumItem = sum(SalesQuantity)) %>% .[-154,]
+
+fast_item <- data_b[data_b$ProductClass == "Fast Item",c(1,4)] %>% group_by(Date) %>% 
+  summarise(FastItem = sum(SalesQuantity)) %>% .[-154,]
+
+## Stores
+slow_store <- data_b[data_b$StoreClass == "Slow Store",c(1,4)] %>% group_by(Date) %>% 
+  summarise(SlowStore = sum(SalesQuantity))
+
+mid_store <- data_b[data_b$StoreClass == "Medium Store",c(1,4)] %>% group_by(Date) %>% 
+  summarise(MediumStore = sum(SalesQuantity)) %>% .[-154,]
+
+fast_store <- data_b[data_b$StoreClass == "Fast Store",c(1,4)] %>% group_by(Date) %>% 
+  summarise(FastStore = sum(SalesQuantity)) %>% .[-154,]
+
+test <- cbind(slow_store, mid_store[,2], fast_store[,2], slow_item[,2], mid_item[,2], fast_item[,2])
+rm(slow_item,mid_item,fast_item,slow_store,mid_store,fast_store)
+test_ts <- xts(test[,-1], test$Date)
+data_ts # In this section, this series will be used to forecast the next 153 days.
+test_ts # This set will be used to test the forecast.
+
+# Slow Stores Holt's Method ####
+beta <- seq(.0001, .5, by = .001)
+RMSE <- NA
+for(i in seq_along(beta)){
+  fit <- holt(data_ts$SlowStore,beta = beta[i],h = nrow(test_ts))
+  RMSE[i] <- accuracy(fit,test_ts$SlowStore)[2,2]
+}
+data_frame(beta, RMSE) %>% filter(RMSE==min(RMSE)) # Optimum beta is 0.0011.
+
+holt_slow_store <- holt(data_ts$SlowStore, beta = 0.0011,h = nrow(test_ts))
+autoplot(holt_slow_store)+theme_minimal()+autolayer(fitted(holt_slow_store), series="Fitted") 
+accuracy(holt_slow_store, test_ts$SlowStore)
+
+# Medium Stores Holt's Method ####
+beta <- seq(.0001, .5, by = .001)
+RMSE <- NA
+for(i in seq_along(beta)){
+  fit <- holt(data_ts$MediumStore,beta = beta[i],h = nrow(test_ts))
+  RMSE[i] <- accuracy(fit,test_ts$MediumStore)[2,2]
+}
+data_frame(beta, RMSE) %>% filter(RMSE==min(RMSE)) # Optimum beta is 0.0011.
+
+holt_mid_store <- holt(data_ts$MediumStore, beta = 0.0011,h = nrow(test_ts))
+autoplot(holt_mid_store)+theme_minimal()+autolayer(fitted(holt_mid_store), series="Fitted") 
+accuracy(holt_mid_store, test_ts$SlowStore)
+
+# Fast Stores SES ####
+alpha <- seq(.01, .99, by = .01)
+RMSE <- NA
+for(i in seq_along(alpha)){
+  fit <- ses(data_ts$FastStore, alpha = alpha[i],h = nrow(test_ts))
+  RMSE[i] <- accuracy(fit,test_ts$FastStore)[2,2]
+}
+data.frame(alpha, RMSE) %>% filter(RMSE == min(RMSE)) # Optimum alpha is 0.31
+
+ses_fast_store <- ses(data_ts$FastStore, a=0.31,  h=nrow(test_ts))
+autoplot(ses_fast_store)+theme_minimal()+autolayer(fitted(ses_fast_store), series="Fitted") 
+accuracy(ses_fast_store, test_ts$FastStore)
+
+# Slow Items SES ####
+alpha <- seq(.01, .99, by = .01)
+RMSE <- NA
+for(i in seq_along(alpha)){
+  fit <- ses(data_ts$SlowItem, alpha = alpha[i],h = nrow(test_ts))
+  RMSE[i] <- accuracy(fit,test_ts$SlowItem)[2,2]
+}
+data.frame(alpha, RMSE) %>% filter(RMSE == min(RMSE)) # Optimum alpha is 0.13
+
+ses_slow_item <- ses(data_ts$SlowItem, a=0.13,  h=nrow(test_ts))
+autoplot(ses_slow_item)+theme_minimal()+autolayer(fitted(ses_slow_item), series="Fitted") 
+accuracy(ses_slow_item, test_ts$SlowItem)
+
+
+# Medium Stores Holt's Method ####
+beta <- seq(.0001, .5, by = .001)
+RMSE <- NA
+for(i in seq_along(beta)){
+  fit <- holt(data_ts$MediumItem,beta = beta[i],h = nrow(test_ts))
+  RMSE[i] <- accuracy(fit,test_ts$MediumItem)[2,2]
+}
+data_frame(beta, RMSE) %>% filter(RMSE==min(RMSE)) # Optimum beta is 0.0031. But 0.002 results in a better forecast.
+
+holt_mid_item <- holt(data_ts$MediumItem, beta = 0.002,h = nrow(test_ts))
+autoplot(holt_mid_item)+theme_minimal()+autolayer(fitted(holt_mid_item), series="Fitted") 
+accuracy(holt_mid_item, test_ts$MediumItem)
+
+
+# Fast Stores SES ####
+alpha <- seq(.01, .99, by = .01)
+RMSE <- NA
+for(i in seq_along(alpha)){
+  fit <- ses(data_ts$FastItem, alpha = alpha[i],h = nrow(test_ts))
+  RMSE[i] <- accuracy(fit,test_ts$FastStore)[2,2]
+}
+data.frame(alpha, RMSE) %>% filter(RMSE == min(RMSE)) # Optimum alpha is 0.27. But 0.17 works better.
+
+ses_fast_item <- ses(data_ts$FastItem, a=0.17,  h=nrow(test_ts))
+autoplot(ses_fast_item)+theme_minimal()+autolayer(fitted(ses_fast_item), series="Fitted") 
+accuracy(ses_fast_item, test_ts$FastItem)
+
+# Promotion Five ####
+prom_five <- window(rbind(data_ts, test_ts), start = "2015-01-01", end = "2015-09-06")
+prom_train <- window(rbind(data_ts, test_ts), start = "2015-01-01", end = "2015-08-31")
+prom_test <- window(rbind(data_ts, test_ts), start = "2015-09-01", end = "2015-09-06")
+# Slow Stores Holt's Method ####
+beta <- seq(.0001, .5, by = .001)
+RMSE <- NA
+for(i in seq_along(beta)){
+  fit <- holt(prom_train$SlowStore,beta = beta[i],h = nrow(prom_test))
+  RMSE[i] <- accuracy(fit,prom_test$SlowStore)[2,2]
+}
+data_frame(beta, RMSE) %>% filter(RMSE==min(RMSE)) # Optimum beta is 0.0061.
+
+holt_slow_store <- holt(prom_train$SlowStore, beta = 0.0061,h = nrow(prom_test))
+autoplot(holt_slow_store)+theme_minimal()+autolayer(fitted(holt_slow_store), series="Fitted") 
+accuracy(holt_slow_store, prom_test$SlowStore)
+
+# Medium Stores Holt's Method ####
+beta <- seq(.0001, .5, by = .001)
+RMSE <- NA
+for(i in seq_along(beta)){
+  fit <- holt(prom_train$MediumStore,beta = beta[i],h = nrow(prom_test))
+  RMSE[i] <- accuracy(fit,prom_test$MediumStore)[2,2]
+}
+data_frame(beta, RMSE) %>% filter(RMSE==min(RMSE)) # Optimum beta is 0.283. But 0.1 will be used.
+
+holt_mid_store <- holt(prom_train$MediumStore, beta = 0.1, h = nrow(prom_test))
+autoplot(holt_mid_store)+theme_minimal()+autolayer(fitted(holt_mid_store), series="Fitted") 
+accuracy(holt_mid_store, prom_test$SlowStore)
+
+# Fast Stores SES ####
+alpha <- seq(.01, .99, by = .01)
+RMSE <- NA
+for(i in seq_along(alpha)){
+  fit <- ses(prom_train$FastStore, alpha = alpha[i],h = nrow(prom_test))
+  RMSE[i] <- accuracy(fit,prom_test$FastStore)[2,2]
+}
+data.frame(alpha, RMSE) %>% filter(RMSE == min(RMSE)) # Optimum alpha is 0.01 but 0.2 will be used.
+
+ses_fast_store <- ses(prom_train$FastStore, a=0.01,  h=nrow(prom_test))
+autoplot(ses_fast_store)+theme_minimal()+autolayer(fitted(ses_fast_store), series="Fitted") 
+accuracy(ses_fast_store, prom_test$FastStore)
+# Slow Items SES ####
+alpha <- seq(.01, .99, by = .01)
+RMSE <- NA
+for(i in seq_along(alpha)){
+  fit <- ses(prom_train$SlowItem, alpha = alpha[i],h = nrow(prom_test))
+  RMSE[i] <- accuracy(fit,prom_test$SlowItem)[2,2]
+}
+data.frame(alpha, RMSE) %>% filter(RMSE == min(RMSE)) # Optimum alpha is 0.01 but 0.2 seems to work better.
+
+ses_slow_item <- ses(prom_train$SlowItem, a=0.2,  h=nrow(prom_test))
+autoplot(ses_slow_item)+theme_minimal()+autolayer(fitted(ses_slow_item), series="Fitted") 
+accuracy(ses_slow_item, prom_test$SlowItem)
+
+# Medium Stores Holt's Method ####
+beta <- seq(.0001, .5, by = .001)
+RMSE <- NA
+for(i in seq_along(beta)){
+  fit <- holt(prom_train$MediumItem,beta = beta[i],h = nrow(prom_test))
+  RMSE[i] <- accuracy(fit,prom_test$MediumItem)[2,2]
+}
+data_frame(beta, RMSE) %>% filter(RMSE==min(RMSE)) # Optimum beta is 0.499 but 0.005 will be used to prevent overlearning.
+
+holt_mid_item <- holt(prom_train$MediumItem, beta = 0.005,h = nrow(prom_test))
+autoplot(holt_mid_item)+theme_minimal()+autolayer(fitted(holt_mid_item), series="Fitted") 
+accuracy(holt_mid_item, prom_test$MediumItem)
+
+# Fast Stores SES ####
+alpha <- seq(.01, .99, by = .01)
+RMSE <- NA
+for(i in seq_along(alpha)){
+  fit <- ses(prom_train$FastItem, alpha = alpha[i],h = nrow(prom_test))
+  RMSE[i] <- accuracy(fit,prom_test$FastStore)[2,2]
+}
+data.frame(alpha, RMSE) %>% filter(RMSE == min(RMSE)) # Optimum alpha is 0.19.
+
+ses_fast_item <- ses(prom_train$FastItem, a=0.19,  h=nrow(prom_test))
+autoplot(ses_fast_item)+theme_minimal()+autolayer(fitted(ses_fast_item), series="Fitted") 
+accuracy(ses_fast_item, prom_test$FastItem)
+
+# Return Rates ####
+return <- data_a[data_a$SalesQuantity < 0,]
+return$SalesQuantity <- return$SalesQuantity*-1
+# Products 
+slow_item <- return[return$ProductClass == "Slow Item",c(1,4)] %>% group_by(Date) %>% 
+  summarise(SlowItem = sum(SalesQuantity)) %>% head(.,207)
+mid_item <- return[return$ProductClass == "Medium Item",c(1,4)] %>% group_by(Date) %>% 
+  summarise(MediumItem = sum(SalesQuantity)) %>% head(.,207)
+fast_item <- return[return$ProductClass == "Fast Item",c(1,4)] %>% group_by(Date) %>% 
+  summarise(FastItem = sum(SalesQuantity)) %>% head(.,207)
+# Stores
+slow_store <- return[return$StoreClass == "Slow Store",c(1,4)] %>% group_by(Date) %>% 
+  summarise(SlowStore = sum(SalesQuantity)) %>% head(.,207)
+mid_store <- return[return$StoreClass == "Medium Store",c(1,4)] %>% group_by(Date) %>% 
+  summarise(MediumStore = sum(SalesQuantity)) %>% head(.,207)
+fast_store <- return[return$StoreClass == "Fast Store",c(1,4)] %>% group_by(Date) %>% 
+  summarise(FastStore = sum(SalesQuantity)) %>% head(.,207)
+return_data <- cbind(slow_store, mid_store[,2], fast_store[,2], slow_item[,2], mid_item[,2], fast_item[,2])
+rm(slow_item,mid_item,fast_item,slow_store,mid_store,fast_store)
+
+return_ts <- xts(return_data[,-1], return_data$Date) # This mts represent daily total return amounts for each product and store type.
+
+autoplot(data_ts)
+
+p1<-autoplot(return_ts[,1])+theme(axis.title.x = element_blank())+ylab("Slow Stores")+
+  geom_rect(data = prom_date[1:4,],inherit.aes = FALSE,mapping = aes(xmin = StartDate, xmax = EndDate, ymin = -Inf, ymax = Inf),
+            color = "transparent",fill = "darkred",alpha = .35)
+p2<-autoplot(return_ts[,2])+theme(axis.title.x = element_blank())+ylab("Medium Stores")+
+  geom_rect(data = prom_date[1:4,],inherit.aes = FALSE,mapping = aes(xmin = StartDate, xmax = EndDate, ymin = -Inf, ymax = Inf),
+            color = "transparent",fill = "darkred",alpha = .35)
+p3<-autoplot(return_ts[,3])+theme(axis.title.x = element_blank())+ylab("Fast Stores")+
+  geom_rect(data = prom_date[1:4,],inherit.aes = FALSE,mapping = aes(xmin = StartDate, xmax = EndDate, ymin = -Inf, ymax = Inf),
+            color = "transparent",fill = "darkred",alpha = .35)
+p4<-autoplot(return_ts[,4])+theme(axis.title.x = element_blank())+ylab("Slow Items")+
+  geom_rect(data = prom_date[1:4,],inherit.aes = FALSE,mapping = aes(xmin = StartDate, xmax = EndDate, ymin = -Inf, ymax = Inf),
+            color = "transparent",fill = "darkred",alpha = .35)
+p5<-autoplot(return_ts[,5])+theme(axis.title.x = element_blank())+ylab("Medium Items")+
+  geom_rect(data = prom_date[1:4,],inherit.aes = FALSE,mapping = aes(xmin = StartDate, xmax = EndDate, ymin = -Inf, ymax = Inf),
+            color = "transparent",fill = "darkred",alpha = .35)
+p6<-autoplot(return_ts[,6])+theme(axis.title.x = element_blank())+ylab("Fast Items")+
+  geom_rect(data = prom_date[1:4,],inherit.aes = FALSE,mapping = aes(xmin = StartDate, xmax = EndDate, ymin = -Inf, ymax = Inf),
+            color = "transparent",fill = "darkred",alpha = .35)
+grid.arrange(p1,p2,p3,nrow=3)
+grid.arrange(p4,p5,p6,nrow=3)
+rm(p1,p2,p3,p4,p5,p6)
+
