@@ -99,10 +99,10 @@ prom_prod <- function(prom_num){ # prom_num is the desired promotion number. (i.
   }
 }
 lapply(1:4, prom_prod) # Gives 10 products that are most effective by each promotion. For example, product 218 has seen one of the highest changes.
-rm(prom_prod)
+
 
 # Promotion Reaction of Stores ####
-prom_store <- function(prom_num){ # prom_num is the desired promotion number. (i.e promotion 5 = 5)
+prom_store <- function(prom_num){
   if(prom_num == 1){
     promb <- data_a[data_a$Date < prom_date$StartDate[prom_num],] %>% group_by(StoreCode) %>% 
       summarise(MeanSale = mean(SalesQuantity), .groups = "drop") # Mean sales of all stores before the first promotion.
@@ -119,21 +119,29 @@ prom_store <- function(prom_num){ # prom_num is the desired promotion number. (i
   }
 }
 lapply(1:4, prom_store) # P-values < 0.05 suggest that there are stores that have higher promotion reactions in all promotion periods.
-rm(prom_store,prom_num)
+
 # Regression ####
-# Gives the data points up until 10 days after the first promotion ends.
-model_data <- data_a[data_a$Date<=prom_date$EndDate[1]+10,]
-model <- lm(SalesQuantity ~ StoreClass+ProductClass, data=model_data) 
+# Regression model of the mean sales difference of days before and after the first promotion.
+# Same principle will be applied to other promoitons as well. (prom_pord(n))
+model_data <- left_join(prom_prod(1), data_a[,c(2,3,5:8)], by = c('ProductCode' = 'ProductCode'))
+model <- lm(diff ~ StoreClass+ProductClass+ProductGroup1+ProductGroup2, data=model_data) 
 summary(model)
 
-# Gives the data points from the end of third promotion to the 10 days after the end of the fourth promotion.
-model_data <- data_a[data_a$Date>=prom_date$EndDate[3] & data_a$Date<=prom_date$EndDate[4]+10,] 
-str(data_a)
-model <- lm(SalesQuantity ~ StoreClass+ProductClass, data=data_a[data_a$Date>=prom_date$EndDate[3] & data_a$Date<=prom_date$EndDate[4],])
-summary(model) 
-# Checking for each period, the highest coefficients are of Fast Items and Fast Stores.
-# This means that these classes are the ones that have the highes promotion reactions.
+model_data <- left_join(prom_prod(2), data_a[,c(2,3,5:8)], by = c('ProductCode' = 'ProductCode'))
+model <- lm(diff ~ StoreClass+ProductClass+ProductGroup1+ProductGroup2, data=model_data) 
+summary(model)
+
+model_data <- left_join(prom_prod(3), data_a[,c(2,3,5:8)], by = c('ProductCode' = 'ProductCode'))
+model <- lm(diff ~ StoreClass+ProductClass+ProductGroup1+ProductGroup2, data=model_data) 
+summary(model)
+
+model_data <- left_join(prom_prod(4), data_a[,c(2,3,5:8)], by = c('ProductCode' = 'ProductCode'))
+model <- lm(diff ~ StoreClass+ProductClass+ProductGroup1+ProductGroup2, data=model_data) 
+summary(model)
+# Its seems that a store being classified as fast and product groups G and 5 are the most important factors for the first three promotion period.
+# On promotion 4 medium stores and fast items are also added to this list.
 rm(model_data, model)
+
 # Time Series ####
 # Get the total sales for each product and store type in each day. Then create a multivariate time series object.
 # Products 
@@ -359,7 +367,7 @@ bptest(lm(r ~ +zlag(data_ts$SlowStore)+zlag(data_ts$SlowStore,2))) # Heterosceda
 f <- forecast(slow_store,h=12)
 autoplot(f)+theme_minimal()+ggtitle("Forecast of ARIMA(2,1,2) for Slow Stores")
 accuracy(f,test$SlowStore) # Errors are too high. ARIMA Models are not good for these series. Others will not be checked.
-rm(p1,p2,slow_store,r,rr,f)
+rm(slow_store,r,f)
 
 # Exponential Smoothing #
 train$SlowStore
@@ -922,25 +930,26 @@ accuracy(ses_fast_item, prom_test$FastItem)
 # Return Rates ####
 return <- data_a[data_a$SalesQuantity < 0,]
 return$SalesQuantity <- return$SalesQuantity*-1
+colnames(return)[4] <- "ReturnQuantity"
+
 # Products 
 slow_item <- return[return$ProductClass == "Slow Item",c(1,4)] %>% group_by(Date) %>% 
-  summarise(SlowItem = sum(SalesQuantity)) %>% head(.,207)
+  summarise(SlowItem = sum(ReturnQuantity)) %>% head(.,207)
 mid_item <- return[return$ProductClass == "Medium Item",c(1,4)] %>% group_by(Date) %>% 
-  summarise(MediumItem = sum(SalesQuantity)) %>% head(.,207)
+  summarise(MediumItem = sum(ReturnQuantity)) %>% head(.,207)
 fast_item <- return[return$ProductClass == "Fast Item",c(1,4)] %>% group_by(Date) %>% 
-  summarise(FastItem = sum(SalesQuantity)) %>% head(.,207)
+  summarise(FastItem = sum(ReturnQuantity)) %>% head(.,207)
 # Stores
 slow_store <- return[return$StoreClass == "Slow Store",c(1,4)] %>% group_by(Date) %>% 
-  summarise(SlowStore = sum(SalesQuantity)) %>% head(.,207)
+  summarise(SlowStore = sum(ReturnQuantity)) %>% head(.,207)
 mid_store <- return[return$StoreClass == "Medium Store",c(1,4)] %>% group_by(Date) %>% 
-  summarise(MediumStore = sum(SalesQuantity)) %>% head(.,207)
+  summarise(MediumStore = sum(ReturnQuantity)) %>% head(.,207)
 fast_store <- return[return$StoreClass == "Fast Store",c(1,4)] %>% group_by(Date) %>% 
-  summarise(FastStore = sum(SalesQuantity)) %>% head(.,207)
+  summarise(FastStore = sum(ReturnQuantity)) %>% head(.,207)
 return_data <- cbind(slow_store, mid_store[,2], fast_store[,2], slow_item[,2], mid_item[,2], fast_item[,2])
 rm(slow_item,mid_item,fast_item,slow_store,mid_store,fast_store)
 
 return_ts <- xts(return_data[,-1], return_data$Date) # This mts represent daily total return amounts for each product and store type.
-
 autoplot(data_ts)
 
 p1<-autoplot(return_ts[,1])+theme(axis.title.x = element_blank())+ylab("Slow Stores")+
@@ -964,4 +973,27 @@ p6<-autoplot(return_ts[,6])+theme(axis.title.x = element_blank())+ylab("Fast Ite
 grid.arrange(p1,p2,p3,nrow=3)
 grid.arrange(p4,p5,p6,nrow=3)
 rm(p1,p2,p3,p4,p5,p6)
+
+# Below code calculates the mean return rate differences in for non promotion and promotion time intervals.
+# The same approach is used while testing the stores as well.
+
+prom_num <- 0
+prom_return <- function(prom_num){
+  if(prom_num == 1){
+    promb <- return[return$Date < prom_date$StartDate[prom_num],] %>% group_by(ProductCode) %>% 
+      summarise(Before = mean(ReturnQuantity), .groups = "drop")
+    prom <- return[return$Date >= prom_date$StartDate[prom_num] & return$Date <= prom_date$EndDate[prom_num],] %>% group_by(ProductCode) %>% 
+      summarise(After = mean(ReturnQuantity), .groups = "drop")
+    wilcox.test(promb$Before, prom$After)
+    
+  }else{
+    promb <- return[return$Date > prom_date$EndDate[prom_num-1] & return$Date <= prom_date$StartDate[prom_num],] %>% group_by(ProductCode) %>% 
+      summarise(Before = mean(ReturnQuantity), .groups = "drop")
+    prom <- return[return$Date >= prom_date$StartDate[prom_num] & return$Date <= prom_date$EndDate[prom_num],] %>% group_by(ProductCode) %>% 
+      summarise(After = mean(ReturnQuantity), .groups = "drop")
+    wilcox.test(promb$Before, prom$After)
+  }
+}
+
+lapply(1:4,prom_return) # There is significant difference in item return rates only after promotion 3
 
